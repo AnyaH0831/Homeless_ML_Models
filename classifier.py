@@ -11,10 +11,10 @@ df = pd.read_csv('data/merged_common_columns.csv')
 numerical_cols = ['age']
 categorical_cols = [
     'gender', 'has_dependents', 
-    'outdoor_sleeping', 'chronic_homeless', 'youth', 'indigenous_flag','no_income', 'income_type'
+    'outdoor_sleeping', 'chronic_homeless', 'youth', 'no_income', 'income_type'
     
 ]
-#  'mental_health', 'substance_use',
+#  'mental_health', 'substance_use','indigenous_flag',
 X = df[numerical_cols + categorical_cols]
 y = df['data_source'].astype(str)
 
