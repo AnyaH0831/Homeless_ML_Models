@@ -1,91 +1,165 @@
 """
 merge_datasets.py
 
-Merges THREE individual-level sources into a single dataset containing
-only the columns/concepts they have in common:
+Standardizes THREE individual-level sources onto one common schema and
+writes them out as:
 
+    - three per-source files, each named after its data_source value
+      (real_lanark.csv, synthetic_toronto_sasm.csv,
+      synthetic_ottawa_sasm.csv) -- identical column structure, so they
+      can be vertically concatenated at any point with a one-line
+      pd.concat()
+    - one combined file (all three stacked together) for convenience,
+      unless --no-combined is passed
+
+Inputs:
     1. toronto_sasm_synthetic_individuals.csv   (SASM schema)
     2. ottawa_sasm_synthetic_individuals.csv    (SASM schema)
-    3. lanark_bnl_cleaned.csv                   (output of clean_lanark_bnl.py)
+    3. lanark_bnl_cleaned.csv                   (output of clean_lanark_bnl.py,
+                                                   already trimmed to the
+                                                   common columns)
 
-This does a "stack" merge (concatenation), not a row-level join: each
-source represents different individuals, so the goal is a combined
-individual-level table with a shared, standardized schema plus a
-`source_dataset` column (and a `city` column) to track provenance.
+This does a "stack" (concatenation), not a row-level join: each source
+represents different individuals, so the goal is a shared, standardized
+schema across all three, not a merge keyed by ID.
 
-The two SASM-schema files share identical columns with each other, so
-they're merged the same way; the Lanark file uses a different crosswalk
-since its raw columns/concepts don't line up 1:1 (see clean_lanark_bnl.py
-and the earlier mapping discussion for details on partial/no matches).
+--- Provenance columns (every row, every file) ---
+    data_source: "real_lanark", "synthetic_toronto_sasm", or
+                 "synthetic_ottawa_sasm"
+    data_type:   "observed" for real_lanark, "synthetic" for the other two
 
-Crosswalk used (standardized column -> SASM column -> Lanark column):
-    year                  -> year                 -> (no single "year" field;
-                                                        blank unless --lanark-year-col)
-    age                   -> age                   -> age
-    years_homeless        -> years_homeless        -> years_homeless
-    gender                -> gender                -> gender
-    has_dependents        -> has_dependents        -> has_dependents
-    mental_health         -> mental_health         -> mental_health
-    substance_use         -> substance_use         -> substance_use
-    outdoor_sleeping      -> outdoor_sleeping       -> outdoor_sleeping
-    chronic_homeless      -> chronic_homeless       -> chronic_homeless
-    youth                 -> youth                  -> youth
-    indigenous_flag       -> indigenous_flag        -> indigenous_flag
-    no_income             -> no_income               -> no_income
-    income_type           -> income_type             -> income_type
+Per TRIPOD-AI / STROBE-style transparent-reporting practice, these let
+you (a) report provenance explicitly, and (b) run the diagnostic of
+training a classifier to predict data_source from the features -- if
+it's near-perfect, the populations are too different to pool naively.
 
-Columns present in only one schema (e.g. race, education, lgbtq,
-foster_care_history, housing_loss_income/health from the SASM files, or
-client_id, veteran_status, sleeping_arrangement_raw from the Lanark data)
-are intentionally left out of this merged file.
+--- Structural-missingness columns (Missing By Design) ---
+For every common column that a given source never measures at all --
+not "missing data" but "this survey never asked it" -- two things
+happen:
+    1. The column is added with NaN/NA for that source's rows (never
+       silently dropped or imputed).
+    2. A companion binary column "{column}_available_in_source" is
+       added: 1 for rows from a source that genuinely measures that
+       concept, 0 for rows from a source where it's structurally
+       absent, only approximate, or a loose proxy.
+
+This distinction matters for downstream modeling: MCAR/MAR imputation
+(mean-fill, MICE) assumes the value COULD have been observed. Here it
+structurally couldn't for some sources, so it must be flagged rather
+than silently imputed.
+
+The Toronto/Ottawa SASM files define every one of the common columns
+directly, so they're fully available (1) across the board. The Lanark
+availability calls, based on the earlier column-by-column mapping-
+quality review:
+
+    year              -> available (1): derived from last_contact_date's
+                          year, a genuine (if approximate) proxy
+    age               -> available (1): direct field
+    years_homeless    -> NOT available (0): Lanark only has "months
+                          homeless in the past year", not a true
+                          lifetime years-homeless total
+    gender            -> available (1): direct field
+    has_dependents    -> NOT available (0): derived from head-of-household
+                          / number-of-children rather than asked directly
+    mental_health     -> NOT available (0): extracted from caseworker
+                          notes as Yes/Unknown only -- no explicit "No",
+                          so true negatives can't be distinguished from
+                          "not mentioned"
+    substance_use     -> NOT available (0): same caveat as mental_health
+    outdoor_sleeping  -> NOT available (0): recoded from a free-text
+                          "current sleeping arrangements" field, not a
+                          direct outdoor-sleeping question
+    chronic_homeless  -> available (1): direct checkbox field
+    youth             -> available (1): direct checkbox field
+    indigenous_flag   -> available (1): direct field
+    no_income         -> available (1): direct (inverted) field
+    income_type       -> available (1): direct field (category vocabulary
+                          differs from SASM's, but the concept is
+                          genuinely measured)
+
+Adjust the AVAILABILITY dict below if you disagree with any of these
+calls -- they're judgment calls about data quality, not hard facts.
 
 Usage:
     python merge_datasets.py \
         --toronto toronto_sasm_synthetic_individuals.csv \
         --ottawa ottawa_sasm_synthetic_individuals.csv \
         --lanark lanark_bnl_cleaned.csv \
-        --output merged_common_columns.csv
+        --output-dir ./merged
 """
 
 import argparse
+import os
 import pandas as pd
 
-# Standardized common schema for the two SASM-schema sources (identical
-# column names on both sides, so a single map covers Toronto and Ottawa).
-SASM_COMMON_COLUMNS = {
-    "year": "year",
-    "age": "age",
-    "years_homeless": "years_homeless",
-    "gender": "gender",
-    "has_dependents": "has_dependents",
-    "mental_health": "mental_health",
-    "substance_use": "substance_use",
-    "outdoor_sleeping": "outdoor_sleeping",
-    "chronic_homeless": "chronic_homeless",
-    "youth": "youth",
-    "indigenous_flag": "indigenous_flag",
-    "no_income": "no_income",
-    "income_type": "income_type",
+# The common schema, in the same order for every source/file.
+COMMON_COLUMNS = [
+    "year",
+    "age",
+    "years_homeless",
+    "gender",
+    "has_dependents",
+    "mental_health",
+    "substance_use",
+    "outdoor_sleeping",
+    "chronic_homeless",
+    "youth",
+    "indigenous_flag",
+    "no_income",
+    "income_type",
+]
+
+# Columns that should stay whole numbers (0/1 flags, counts) rather than
+# floats, using pandas' nullable Int64 so missing values don't force the
+# whole column to render as e.g. "1.0" instead of "1".
+INT_COLUMNS = {
+    "year",
+    "has_dependents",
+    "mental_health",
+    "substance_use",
+    "outdoor_sleeping",
+    "chronic_homeless",
+    "youth",
+    "indigenous_flag",
+    "no_income",
 }
 
-# Standardized common schema for the Lanark (BNL) source -> its cleaned
-# column names, as produced by clean_lanark_bnl.py. "year" has no direct
-# source column by default (see --lanark-year-col).
-LANARK_COMMON_COLUMNS = {
-    "year": None,
-    "age": "age",
-    "years_homeless": "years_homeless",
-    "gender": "gender",
-    "has_dependents": "has_dependents",
-    "mental_health": "mental_health",
-    "substance_use": "substance_use",
-    "outdoor_sleeping": "outdoor_sleeping",
-    "chronic_homeless": "chronic_homeless",
-    "youth": "youth",
-    "indigenous_flag": "indigenous_flag",
-    "no_income": "no_income",
-    "income_type": "income_type",
+DATA_SOURCES = ("real_lanark", "synthetic_toronto_sasm", "synthetic_ottawa_sasm")
+
+DATA_TYPE_BY_SOURCE = {
+    "real_lanark": "observed",
+    "synthetic_toronto_sasm": "synthetic",
+    "synthetic_ottawa_sasm": "synthetic",
 }
+
+# {column: {data_source: 0 or 1}}. The two SASM sources define every
+# common column directly, so they're fully available (1) everywhere.
+# Only real_lanark's per-column calls vary -- see the module docstring
+# for the reasoning behind each one.
+AVAILABILITY = {
+    col: {src: 1 for src in DATA_SOURCES}
+    for col in COMMON_COLUMNS
+}
+for _col in ("years_homeless", "has_dependents", "mental_health",
+             "substance_use", "outdoor_sleeping"):
+    AVAILABILITY[_col]["real_lanark"] = 0
+
+# Only columns where availability actually differs across sources get a
+# companion "_available_in_source" column -- nothing to flag for a
+# column that's fully available everywhere.
+FLAGGED_COLUMNS = [
+    col for col in COMMON_COLUMNS
+    if len(set(AVAILABILITY[col].values())) > 1
+]
+
+# Final column order used for every output file (per-source AND combined).
+ORDERED_COLUMNS = (
+    COMMON_COLUMNS
+    + ["data_source", "data_type"]
+    + [f"{c}_available_in_source" for c in FLAGGED_COLUMNS]
+)
 
 
 def normalize_gender(series):
@@ -106,30 +180,46 @@ def normalize_gender(series):
     return series.apply(_map)
 
 
-def build_subset(df, colmap, source_label, city_label):
-    """Given a source dataframe and a {output_col: source_col} mapping,
-    return a dataframe with only the output columns (missing source
-    columns become all-NA columns) plus source_dataset/city tags."""
+def build_subset(df, data_source):
+    """Return a dataframe in the exact common schema: every common
+    column present (NaN/NA where structurally absent for this source),
+    the two provenance columns, and one _available_in_source companion
+    per flagged column. Nothing else from the source carries over."""
     out = pd.DataFrame(index=df.index)
-    for out_col, src_col in colmap.items():
-        if src_col is not None and src_col in df.columns:
-            out[out_col] = df[src_col]
+
+    for col in COMMON_COLUMNS:
+        if col in df.columns:
+            out[col] = df[col]
         else:
-            out[out_col] = pd.NA
-    out["source_dataset"] = source_label
-    out["city"] = city_label
-    return out
+            # Structurally absent (Missing By Design), not just NaN data.
+            out[col] = pd.NA
+        if col in INT_COLUMNS:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+
+    out["gender"] = normalize_gender(out["gender"])
+
+    out["data_source"] = data_source
+    out["data_type"] = DATA_TYPE_BY_SOURCE[data_source]
+
+    for col in FLAGGED_COLUMNS:
+        out[f"{col}_available_in_source"] = pd.array(
+            [AVAILABILITY[col][data_source]] * len(df), dtype="Int64"
+        )
+
+    return out[ORDERED_COLUMNS]
 
 
-def load_and_subset(path, colmap, source_label, city_label):
-    print(f"[info] Loading {source_label}: {path}")
+def load_and_subset(path, data_source):
+    print(f"[info] Loading {data_source}: {path}")
     df = pd.read_csv(path)
     print(f"[info]   {len(df)} rows, {df.shape[1]} columns.")
-    return build_subset(df, colmap, source_label, city_label)
+    return build_subset(df, data_source)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--toronto",
         default="toronto_sasm_synthetic_individuals.csv",
@@ -146,52 +236,42 @@ def main():
         help="Path to the cleaned Lanark BNL CSV (output of clean_lanark_bnl.py).",
     )
     parser.add_argument(
-        "--output",
-        default="merged_common_columns.csv",
-        help="Path to write the merged CSV to.",
+        "--output-dir",
+        default=".",
+        help="Directory to write the per-source and combined CSVs into.",
     )
     parser.add_argument(
-        "--lanark-year-col",
-        default=None,
-        help=(
-            "Optional column name in the cleaned Lanark CSV to use as "
-            "'year' (e.g. derive one from added_to_bnl_date before "
-            "running this script). Left blank/NA if not supplied."
-        ),
+        "--no-combined",
+        action="store_true",
+        help="Skip writing the combined (all-three-stacked) CSV; write "
+             "only the three per-source files.",
     )
     args = parser.parse_args()
 
-    lanark_colmap = dict(LANARK_COMMON_COLUMNS)
-    if args.lanark_year_col:
-        lanark_colmap["year"] = args.lanark_year_col
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    toronto_subset = load_and_subset(
-        args.toronto, SASM_COMMON_COLUMNS, "sasm_synthetic", "toronto"
-    )
-    ottawa_subset = load_and_subset(
-        args.ottawa, SASM_COMMON_COLUMNS, "sasm_synthetic", "ottawa"
-    )
-    lanark_subset = load_and_subset(
-        args.lanark, lanark_colmap, "lanark_bnl", "lanark"
-    )
+    subsets = {
+        "real_lanark": load_and_subset(args.lanark, "real_lanark"),
+        "synthetic_toronto_sasm": load_and_subset(args.toronto, "synthetic_toronto_sasm"),
+        "synthetic_ottawa_sasm": load_and_subset(args.ottawa, "synthetic_ottawa_sasm"),
+    }
 
-    merged = pd.concat(
-        [toronto_subset, ottawa_subset, lanark_subset],
-        ignore_index=True,
-        sort=False,
-    )
+    # Three per-source files, each named after its data_source value, all
+    # in the identical column structure so they're trivially concatenable.
+    for data_source, subset_df in subsets.items():
+        out_path = os.path.join(args.output_dir, f"{data_source}.csv")
+        subset_df.to_csv(out_path, index=False)
+        print(f"[info] Wrote {len(subset_df)} rows to: {out_path}")
 
-    # Standardize gender categories across all three sources so the
-    # merged column is actually usable for cross-source comparison.
-    merged["gender"] = normalize_gender(merged["gender"])
-
-    merged.to_csv(args.output, index=False)
-    print(
-        f"[info] Wrote merged dataset with {len(merged)} rows "
-        f"({len(toronto_subset)} Toronto + {len(ottawa_subset)} Ottawa + "
-        f"{len(lanark_subset)} Lanark) and {merged.shape[1]} columns "
-        f"to: {args.output}"
-    )
+    if not args.no_combined:
+        combined = pd.concat(
+            [subsets[src] for src in DATA_SOURCES],
+            ignore_index=True,
+            sort=False,
+        )[ORDERED_COLUMNS]
+        combined_path = os.path.join(args.output_dir, "merged_common_columns.csv")
+        combined.to_csv(combined_path, index=False)
+        print(f"[info] Wrote combined dataset with {len(combined)} rows to: {combined_path}")
 
 
 if __name__ == "__main__":
