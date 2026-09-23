@@ -92,6 +92,7 @@ Usage:
 
 import argparse
 import os
+import re
 import pandas as pd
 
 # The common schema, in the same order for every source/file.
@@ -164,11 +165,19 @@ ORDERED_COLUMNS = (
 
 def normalize_gender(series):
     """Collapse free-text gender values from all three sources into a
-    small shared set of categories so the merged column is comparable."""
+    small shared set of categories so the merged column uses one
+    vocabulary, no synonyms. SASM's two sources already use
+    "trans_nonbinary"; Lanark's "non-binary" is mapped onto that same
+    label so there's a single canonical term for the concept."""
     mapping = {
         "m": "male", "male": "male",
         "f": "female", "female": "female",
         "man": "male", "woman": "female",
+        "non-binary": "trans_nonbinary",
+        "nonbinary": "trans_nonbinary",
+        "non binary": "trans_nonbinary",
+        "trans_nonbinary": "trans_nonbinary",
+        "trans nonbinary": "trans_nonbinary",
     }
 
     def _map(v):
@@ -178,6 +187,54 @@ def normalize_gender(series):
         return mapping.get(s, s if s else pd.NA)
 
     return series.apply(_map)
+
+
+# --- Income type: Lanark's version is raw case-worker free text (80+
+# distinct strings, typos, IDs, multiple sources listed together);
+# SASM's is 5 clean categories. To use one shared vocabulary with no
+# synonyms, Lanark's text is recoded into SASM's categories by keyword,
+# checked in this priority order when a string mentions more than one
+# income source (e.g. "ODSP and empl" -> disability wins):
+#   1. disability  - CPP-D, ODSP, LTD, WSIB, any "disab*" mention
+#   2. welfare     - OW (Ontario Works), "welfare", "general assistance"
+#   3. employment  - "emp*" (employed/employment/self-employment), EI
+#   4. informal    - VYSA, "informal", "spousal support", "family support"
+#   5. other       - anything else with text present but no keyword hit
+#                    (OAS/CPP retirement pensions, "unknown", "no income",
+#                    "none", "?", etc.)
+# A genuinely blank/NaN source value stays NaN (no data), which is
+# different from "other" (a value was given, it just isn't one of the
+# 4 specific categories).
+#
+# This is a judgment call, not a certainty -- e.g. "pension from
+# employment" gets tagged "employment" because the text contains that
+# word, even though it's really describing a pension. Adjust the regex
+# patterns below if you want different rules.
+_INCOME_DISABILITY_RE = re.compile(r"cpp-d|\bodsp\b|\bltd\b|disab|wsib", re.I)
+_INCOME_WELFARE_RE = re.compile(r"\bow\b|welfare|general assistance", re.I)
+_INCOME_EMPLOYMENT_RE = re.compile(r"emp|self-employ|\bei\b", re.I)
+_INCOME_INFORMAL_RE = re.compile(r"vysa|informal|spousal support|family support", re.I)
+
+
+def recode_lanark_income_type(series):
+    """Recode Lanark's free-text income_type into SASM's 5 categories
+    (disability/welfare/employment/informal/other). See the comment
+    block above for the exact priority rules."""
+    def _classify(v):
+        if pd.isna(v) or str(v).strip() == "":
+            return pd.NA
+        s = str(v).strip()
+        if _INCOME_DISABILITY_RE.search(s):
+            return "disability"
+        if _INCOME_WELFARE_RE.search(s):
+            return "welfare"
+        if _INCOME_EMPLOYMENT_RE.search(s):
+            return "employment"
+        if _INCOME_INFORMAL_RE.search(s):
+            return "informal"
+        return "other"
+
+    return series.apply(_classify)
 
 
 def build_subset(df, data_source):
@@ -197,6 +254,9 @@ def build_subset(df, data_source):
             out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
 
     out["gender"] = normalize_gender(out["gender"])
+
+    if data_source == "real_lanark":
+        out["income_type"] = recode_lanark_income_type(out["income_type"])
 
     out["data_source"] = data_source
     out["data_type"] = DATA_TYPE_BY_SOURCE[data_source]
