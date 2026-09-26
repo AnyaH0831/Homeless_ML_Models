@@ -11,3 +11,22 @@
 
 To run synth_xgboost.py:
 python3 synth_xgboost.py --toronto data/synthetic_toronto_sasm.csv --ottawa data/synthetic_ottawa_sasm.csv --lanark data/real_lanark.csv
+
+
+## Different Training Conditions: 
+
+Condition A: Lanark Only Data
+- Logistical Regression: logreg_lanark.py
+- XGBoost: xgboost_lanark.py
+
+Condition B: Train the model using synthetic data only and validate it on Lanark data
+- Logistical Regression: synth_log.py
+- XGBoost: synth_xgboost.py
+
+Condition C: Pretrain using synthetic data then fine-tune using Lanark data
+- Logistical Regression: logreg_finetune.py
+- XGBoost: xgboost_finetune.py
+
+Condition D: Partial Pooling 
+- partial_pooling.py
+- Partial Pooling with Random Slopes: partial_pooling_random_slopes.py
