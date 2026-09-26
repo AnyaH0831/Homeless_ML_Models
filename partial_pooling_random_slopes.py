@@ -24,13 +24,23 @@ Usage:
         --ottawa data/synthetic_ottawa_sasm.csv \
         --lanark data/real_lanark.csv \
         --random_slope_vars no_income has_dependents
+
+Re-running without resampling:
+    Once a model has been fit, the InferenceData is cached to disk (see
+    --idata_path, default "idata_cache.nc"). If that file exists, the script
+    loads it instead of refitting -- so tweaking the evaluation code no
+    longer costs you the full ~1hr sampling run. Pass --refit to force a
+    fresh fit even if a cache file exists.
 """
 
 import argparse
+import os
+import pickle
 import numpy as np
 import pandas as pd
 import bambi as bmb
 import arviz as az
+from scipy.special import expit
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
 
@@ -104,6 +114,8 @@ def build_formula(random_slope_vars=None, subgroup_col=None):
 
 def evaluate(y_true, proba, label):
     y_true = np.asarray(y_true)
+    proba = np.asarray(proba)
+
     auc_roc = (
         roc_auc_score(y_true, proba)
         if len(np.unique(y_true)) > 1
@@ -171,6 +183,8 @@ def main(
     chains=4,
     cores=1,
     target_accept=0.99,
+    idata_path="idata_cache.pkl",
+    refit=False,
 ):
 
     # --- Load and tag each source ---
@@ -227,7 +241,7 @@ def main(
         f"{lanark_val_imputed[TARGET].sum()} positives"
     )
 
-    # --- Fit the random-slope hierarchical model ---
+    # --- Fit the random-slope hierarchical model (or load cached fit) ---
     formula = build_formula(random_slope_vars, subgroup_col)
     print(f"\nModel formula:\n  {formula}\n")
     if random_slope_vars:
@@ -240,14 +254,35 @@ def main(
         )
 
     model = bmb.Model(formula, data=train_pool, family="bernoulli")
-    idata = model.fit(
-        draws=draws,
-        tune=tune,
-        chains=chains,
-        cores=cores,
-        random_seed=RANDOM_STATE,
-        target_accept=target_accept,
-    )
+
+    if os.path.exists(idata_path) and not refit:
+        print(f"\nFound cached idata at '{idata_path}' -- loading instead of refitting.")
+        print("(Pass --refit to force a fresh sampling run.)")
+        with open(idata_path, "rb") as f:
+            idata = pickle.load(f)
+        # bambi needs the model object "built" against the same data/formula
+        # before it can run .predict() against a loaded idata.
+        model.build()
+    else:
+        idata = model.fit(
+            draws=draws,
+            tune=tune,
+            chains=chains,
+            cores=cores,
+            random_seed=RANDOM_STATE,
+            target_accept=target_accept,
+        )
+        # Cache to disk via pickle (no netCDF4/h5netcdf system dependency
+        # required). Wrapped in try/except so that if caching fails for any
+        # reason, the ~1hr of sampling you just did is not lost -- the run
+        # continues on to evaluation regardless.
+        try:
+            with open(idata_path, "wb") as f:
+                pickle.dump(idata, f)
+            print(f"\nSaved idata to '{idata_path}' (reuse it next time to skip resampling).")
+        except Exception as e:
+            print(f"\nWARNING: failed to cache idata to '{idata_path}': {e}")
+            print("Continuing with evaluation anyway -- this run's fit will not be reusable.")
 
     # --- Convergence check ---
     var_list = [v for v in idata.posterior.data_vars if not v.endswith("__")]
@@ -287,22 +322,47 @@ def main(
             categories=train_pool[subgroup_col].cat.categories,
         )
 
-    # Predict expected probabilities
+    # Sample posterior predictions.
+    # NOTE: kind="response_params" gives the expected probability per row
+    # (this bambi version renamed the old kind="mean" to this), landing in
+    # idata.posterior as f"{TARGET}_mean". kind="response" instead writes raw
+    # 0/1 posterior-*predictive* draws into idata.posterior_predictive, which
+    # .posterior doesn't have -- that mismatch was the cause of the original
+    # crash.
     pred_idata = model.predict(
         idata, data=lanark_val_typed, inplace=False, kind="response_params"
     )
 
-    # Safely retrieve mean predicted probabilities across posterior keys
     posterior_vars = list(pred_idata.posterior.data_vars)
-    if f"{TARGET}_mean" in posterior_vars:
-        proba = pred_idata.posterior[f"{TARGET}_mean"].mean(dim=["chain", "draw"]).values
-    elif TARGET in posterior_vars:
-        proba = pred_idata.posterior[TARGET].mean(dim=["chain", "draw"]).values
-    elif f"{TARGET}_obs" in posterior_vars:
-        proba = pred_idata.posterior[f"{TARGET}_obs"].mean(dim=["chain", "draw"]).values
+    candidates = ["p", f"{TARGET}_mean", f"{TARGET}_obs", TARGET]
+    target_var = next((v for v in candidates if v in posterior_vars), None)
+    if target_var is None:
+        raise RuntimeError(
+            f"None of {candidates} found in posterior; available vars: {posterior_vars}. "
+            "Bambi's naming convention may have changed -- inspect pred_idata.posterior "
+            "directly to find the per-row prediction variable."
+        )
+
+    # Explicitly mean across chain and draw dimensions using xarray
+    da = pred_idata.posterior[target_var]
+    dims_to_mean = [d for d in ["chain", "draw"] if d in da.dims]
+    raw_preds = da.mean(dim=dims_to_mean).values
+
+    # Safety net: catch a wrong-variable selection immediately and loudly,
+    # instead of letting a malformed array reach sklearn three steps later.
+    if raw_preds.shape[0] != len(lanark_val_imputed):
+        raise RuntimeError(
+            f"Prediction array shape {raw_preds.shape} does not match the "
+            f"validation set size ({len(lanark_val_imputed)} rows). This usually "
+            f"means '{target_var}' was the wrong variable -- check "
+            f"pred_idata.posterior.data_vars: {posterior_vars}"
+        )
+
+    # Check bounds to verify probabilities vs log-odds
+    if raw_preds.min() < 0.0 or raw_preds.max() > 1.0:
+        proba = expit(raw_preds)
     else:
-        main_var = posterior_vars[0]
-        proba = pred_idata.posterior[main_var].mean(dim=["chain", "draw"]).values
+        proba = raw_preds
 
     y_val = lanark_val_imputed[TARGET].to_numpy()
 
@@ -371,6 +431,16 @@ if __name__ == "__main__":
         default=0.99,
         help="Set to 0.99 to eliminate sampling divergences.",
     )
+    parser.add_argument(
+        "--idata_path",
+        default="idata_cache.pkl",
+        help="Where to cache/load the fitted InferenceData (pickle format).",
+    )
+    parser.add_argument(
+        "--refit",
+        action="store_true",
+        help="Force a fresh MCMC fit even if a cached idata_path file exists.",
+    )
     args = parser.parse_args()
 
     main(
@@ -385,4 +455,6 @@ if __name__ == "__main__":
         args.chains,
         args.cores,
         args.target_accept,
+        args.idata_path,
+        args.refit,
     )
