@@ -30,6 +30,7 @@ Usage:
 """
 
 import argparse
+import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -240,6 +241,13 @@ def main(toronto_path, ottawa_path, lanark_path, val_size=0.2,
     print(f"\nBootstrap AUC-PR on Lanark holdout: "
           f"{ci['mean']:.3f} (95% CI: {ci['ci_lower']:.3f}-{ci['ci_upper']:.3f}, "
           f"{ci['n_valid_boots']}/1000 valid resamples)")
+
+    os.makedirs("predictions", exist_ok=True)
+    pd.DataFrame({
+        "lanark_idx": lanark_val.index,
+        "y_true": y_val,
+        "proba": finetuned_model.predict_proba(scaler.transform(X_val))[:, 1],
+    }).to_csv("predictions/C_logreg.csv", index=False)
 
     return {"point_estimate": results, "bootstrap": ci,
             "base_model": base_model, "finetuned_model": finetuned_model,

@@ -1,0 +1,5 @@
+condition_a,condition_b,observed_diff,p_value
+C_logreg,D_bayes,0.04857540801876725,0.546
+C_logreg,D2_bayes,0.03834395646566957,0.63
+D_bayes,D2_bayes,-0.010231451553097681,0.622
+C_logreg,A_logreg,0.03760180434253124,0.538

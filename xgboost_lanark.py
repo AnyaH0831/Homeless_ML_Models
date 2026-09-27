@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -220,6 +221,18 @@ def main(lanark_path, val_size=0.2, xgb_n_estimators=100, xgb_max_depth=3,
           f"(95% CI: {logreg_ci['ci_lower']:.3f}-{logreg_ci['ci_upper']:.3f}, "
           f"{logreg_ci['n_valid_boots']}/1000 valid resamples)")
 
+    os.makedirs("predictions", exist_ok=True)
+    pd.DataFrame({
+        "lanark_idx": lanark_val.index,
+        "y_true": y_val,
+        "proba": val_proba,
+    }).to_csv("predictions/A_xgboost.csv", index=False)
+    pd.DataFrame({
+        "lanark_idx": lanark_val.index,
+        "y_true": y_val,
+        "proba": val_proba_lr,
+    }).to_csv("predictions/A_logreg.csv", index=False)
+
     all_results["logreg"] = {"point_estimate": logreg_results, "bootstrap": logreg_ci,
                               "model": logreg_model, "scaler": scaler}
 
@@ -240,6 +253,8 @@ def main(lanark_path, val_size=0.2, xgb_n_estimators=100, xgb_max_depth=3,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Condition A: target-only baseline (real Lanark data alone)")
     parser.add_argument("--lanark", required=True, help="Path to real Lanark CSV")
+    parser.add_argument("--toronto", help="Accepted for shared condition CLI compatibility; unused")
+    parser.add_argument("--ottawa", help="Accepted for shared condition CLI compatibility; unused")
     parser.add_argument("--val_size", type=float, default=0.2, help="Lanark holdout fraction")
     parser.add_argument("--xgb_n_estimators", type=int, default=100)
     parser.add_argument("--xgb_max_depth", type=int, default=3)

@@ -381,6 +381,13 @@ def main(
         "(fine-tuned) to see whether allowing slopes to vary by source closes the gap."
     )
 
+    os.makedirs("predictions", exist_ok=True)
+    pd.DataFrame({
+        "lanark_idx": lanark_val.index,
+        "y_true": y_val,
+        "proba": proba,
+    }).to_csv("predictions/D2_bayes.csv", index=False)
+
     return {
         "point_estimate": results,
         "bootstrap": ci,

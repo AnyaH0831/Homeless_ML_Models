@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -173,6 +174,13 @@ def main(lanark_path, val_size=0.2, logreg_epochs=100, logreg_alpha=0.01):
           f"{ci['mean']:.3f} (95% CI: {ci['ci_lower']:.3f}-{ci['ci_upper']:.3f}, "
           f"{ci['n_valid_boots']}/1000 valid resamples)")
 
+    os.makedirs("predictions", exist_ok=True)
+    pd.DataFrame({
+        "lanark_idx": lanark_val.index,
+        "y_true": y_val,
+        "proba": val_proba,
+    }).to_csv("predictions/A_logreg.csv", index=False)
+
     return {"point_estimate": results, "bootstrap": ci,
             "model": logreg_model, "scaler": scaler,
             "lanark_val_idx": lanark_val.index}
@@ -181,6 +189,8 @@ def main(lanark_path, val_size=0.2, logreg_epochs=100, logreg_alpha=0.01):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Condition A (logreg): target-only baseline, real Lanark data alone")
     parser.add_argument("--lanark", required=True, help="Path to real Lanark CSV")
+    parser.add_argument("--toronto", help="Accepted for shared condition CLI compatibility; unused")
+    parser.add_argument("--ottawa", help="Accepted for shared condition CLI compatibility; unused")
     parser.add_argument("--val_size", type=float, default=0.2, help="Lanark holdout fraction")
     parser.add_argument("--logreg_epochs", type=int, default=100)
     parser.add_argument("--logreg_alpha", type=float, default=0.01,
