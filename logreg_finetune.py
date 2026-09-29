@@ -241,7 +241,6 @@ def main(toronto_path, ottawa_path, lanark_path, val_size=0.2,
     print(f"\nBootstrap AUC-PR on Lanark holdout: "
           f"{ci['mean']:.3f} (95% CI: {ci['ci_lower']:.3f}-{ci['ci_upper']:.3f}, "
           f"{ci['n_valid_boots']}/1000 valid resamples)")
-
     os.makedirs("predictions", exist_ok=True)
     pd.DataFrame({
         "lanark_idx": lanark_val.index,
