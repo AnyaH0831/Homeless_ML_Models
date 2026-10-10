@@ -1,0 +1,4 @@
+source_a,source_b,n_pairs,spearman_rho,p_value
+toronto_synth,ottawa_synth,28,0.473463110204128,0.010932282804844822
+toronto_synth,real_lanark,15,0.04074074074074075,0.8853757724176893
+ottawa_synth,real_lanark,15,0.04983806817472559,0.8599916985705522

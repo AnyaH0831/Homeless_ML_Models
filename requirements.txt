@@ -6,3 +6,5 @@ scikit-learn
 openpyxl
 matplotlib
 xgboost
+torch
+transformers

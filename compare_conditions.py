@@ -10,7 +10,8 @@ if __name__ == "__main__":
         description="Paired bootstrap and permutation comparison across conditions"
     )
     parser.add_argument("--predictions_dir", default="predictions")
-    parser.add_argument("--metric", choices=["auc_pr", "auc_roc"], default="auc_pr")
+    parser.add_argument("--metric", choices=["auc_pr", "auc_roc", "top_k"], default="auc_pr",
+                        help="top_k means recall among the top 10%% highest-risk cases")
     parser.add_argument("--n_boot", type=int, default=2000)
     parser.add_argument("--n_perm", type=int, default=2000)
     parser.add_argument("--key_pairs", nargs="*", default=[

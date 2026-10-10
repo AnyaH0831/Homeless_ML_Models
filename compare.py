@@ -32,8 +32,16 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 
+from top_k_metrics import top_k_metrics
+
 RANDOM_STATE = 42
 METRIC_FUNCS = {"auc_pr": average_precision_score, "auc_roc": roc_auc_score}
+
+
+def metric_value(y_true, proba, metric_name):
+    if metric_name == "top_k":
+        return float(top_k_metrics(y_true, proba, 0.10)["recall_at_k"])
+    return float(METRIC_FUNCS[metric_name](y_true, proba))
 
 
 def load_all_predictions(predictions_dir):
@@ -79,7 +87,6 @@ def load_all_predictions(predictions_dir):
 
 
 def paired_bootstrap(data, metric_name="auc_pr", n_boot=2000, seed=RANDOM_STATE):
-    metric_fn = METRIC_FUNCS[metric_name]
     rng = np.random.default_rng(seed)
 
     names = list(data.keys())
@@ -89,7 +96,8 @@ def paired_bootstrap(data, metric_name="auc_pr", n_boot=2000, seed=RANDOM_STATE)
     proba_by_name = {name: df["proba"].to_numpy() for name, df in data.items()}
 
     # Point estimates per condition (on the full holdout, no resampling)
-    point_estimates = {name: metric_fn(y_true, proba) for name, proba in proba_by_name.items()}
+    point_estimates = {name: metric_value(y_true, proba, metric_name)
+                       for name, proba in proba_by_name.items()}
 
     # Store per-resample scores for every condition, using the SAME resampled
     # indices each iteration -- this is what makes the comparison "paired"
@@ -102,7 +110,7 @@ def paired_bootstrap(data, metric_name="auc_pr", n_boot=2000, seed=RANDOM_STATE)
             continue
         valid_iters += 1
         for name in names:
-            boot_scores[name].append(metric_fn(y_sample, proba_by_name[name][idx]))
+            boot_scores[name].append(metric_value(y_sample, proba_by_name[name][idx], metric_name))
 
     for name in names:
         boot_scores[name] = np.array(boot_scores[name])
@@ -155,14 +163,13 @@ def permutation_test_pair(data, name_a, name_b, metric_name="auc_pr", n_perm=200
     observed difference in performance by much. This tests significance from
     a different angle than the bootstrap CI above.
     """
-    metric_fn = METRIC_FUNCS[metric_name]
     rng = np.random.default_rng(seed)
 
     y_true = data[name_a]["y_true"].to_numpy()
     proba_a = data[name_a]["proba"].to_numpy()
     proba_b = data[name_b]["proba"].to_numpy()
 
-    observed_diff = metric_fn(y_true, proba_a) - metric_fn(y_true, proba_b)
+    observed_diff = metric_value(y_true, proba_a, metric_name) - metric_value(y_true, proba_b, metric_name)
 
     n = len(y_true)
     null_diffs = np.empty(n_perm)
@@ -170,7 +177,7 @@ def permutation_test_pair(data, name_a, name_b, metric_name="auc_pr", n_perm=200
         swap_mask = rng.random(n) < 0.5
         perm_a = np.where(swap_mask, proba_b, proba_a)
         perm_b = np.where(swap_mask, proba_a, proba_b)
-        null_diffs[i] = metric_fn(y_true, perm_a) - metric_fn(y_true, perm_b)
+        null_diffs[i] = metric_value(y_true, perm_a, metric_name) - metric_value(y_true, perm_b, metric_name)
 
     p_value = np.mean(np.abs(null_diffs) >= np.abs(observed_diff))
     print(f"\nPermutation test: {name_a} vs {name_b} "
@@ -179,11 +186,26 @@ def permutation_test_pair(data, name_a, name_b, metric_name="auc_pr", n_perm=200
             "observed_diff": observed_diff, "p_value": p_value}
 
 
+def top_k_summary(data):
+    """Summarize intervention precision/recall for every saved prediction file."""
+    rows = []
+    for name, frame in data.items():
+        y_true = frame["y_true"].to_numpy()
+        proba = frame["proba"].to_numpy()
+        for fraction in (0.05, 0.10, 0.20):
+            metrics = top_k_metrics(y_true, proba, fraction)
+            rows.append({"condition": name, **metrics})
+    return pd.DataFrame(rows).sort_values(["fraction", "recall_at_k"], ascending=[True, False])
+
+
 def main(predictions_dir, metric, n_boot, n_perm, key_pairs):
     data = load_all_predictions(predictions_dir)
     marginal_df, pairs_df, boot_scores, point_estimates = paired_bootstrap(
         data, metric_name=metric, n_boot=n_boot
     )
+    top_k_df = top_k_summary(data)
+    print("\n=== Top-k intervention metrics ===")
+    print(top_k_df.to_string(index=False))
 
     print(f"\n=== Permutation tests for specified key pairs ===")
     perm_results = []
@@ -199,9 +221,11 @@ def main(predictions_dir, metric, n_boot, n_perm, key_pairs):
 
     marginal_df.to_csv("comparison_marginal_summary.csv", index=False)
     pairs_df.to_csv("comparison_paired_differences.csv", index=False)
+    top_k_df.to_csv("comparison_top_k_summary.csv", index=False)
     if not perm_df.empty:
         perm_df.to_csv("comparison_permutation_tests.csv", index=False)
-    print("\nSaved: comparison_marginal_summary.csv, comparison_paired_differences.csv"
+        print("\nSaved: comparison_marginal_summary.csv, comparison_paired_differences.csv, "
+            "comparison_top_k_summary.csv"
           + (", comparison_permutation_tests.csv" if not perm_df.empty else ""))
 
     return marginal_df, pairs_df, perm_df
@@ -211,7 +235,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Paired bootstrap + permutation comparison across conditions")
     parser.add_argument("--predictions_dir", default="predictions",
                          help="Folder containing {condition}_{model}.csv prediction files")
-    parser.add_argument("--metric", choices=["auc_pr", "auc_roc"], default="auc_pr")
+    parser.add_argument("--metric", choices=["auc_pr", "auc_roc", "top_k"], default="auc_pr",
+                        help="top_k means recall among the top 10%% highest-risk cases")
     parser.add_argument("--n_boot", type=int, default=2000)
     parser.add_argument("--n_perm", type=int, default=2000)
     parser.add_argument("--key_pairs", nargs="*",
